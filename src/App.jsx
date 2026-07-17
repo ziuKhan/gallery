@@ -1,5 +1,5 @@
 import React, { useState, useMemo, useRef, useEffect } from 'react';
-import { UploadCloud, Calendar, Folder, Image as ImageIcon, X, ArrowLeft, Trash2, Download, Loader2, Settings, LogOut, Lock } from 'lucide-react';
+import { UploadCloud, Calendar, Folder, Image as ImageIcon, X, ArrowLeft, Trash2, Download, Loader2, Settings, LogOut, Lock, Check } from 'lucide-react';
 import { initializeApp } from 'firebase/app';
 import { getAuth, signInWithCustomToken, signInAnonymously, onAuthStateChanged } from 'firebase/auth';
 import { getFirestore, collection, doc, setDoc, deleteDoc, onSnapshot } from 'firebase/firestore';
@@ -115,6 +115,20 @@ export default function App() {
     localStorage.removeItem('is_logged_in');
     setUsernameInput('');
     setPasswordInput('');
+    setSelectedIds([]); // Reset selection khi logout
+  };
+
+  // Quản lý các ảnh được chọn để thao tác hàng loạt (Bulk Actions)
+  const [selectedIds, setSelectedIds] = useState([]);
+
+  const toggleSelectImage = (id) => {
+    setSelectedIds(prev =>
+      prev.includes(id) ? prev.filter(item => item !== id) : [...prev, id]
+    );
+  };
+
+  const clearSelection = () => {
+    setSelectedIds([]);
   };
 
   // Cấu hình Cloudinary
@@ -289,29 +303,70 @@ export default function App() {
   // ============================================================================
   // 5. XÓA ẢNH TRÊN ĐÁM MÂY
   // ============================================================================
-  const deleteImage = async (id) => {
+  const deleteImage = async (id, silent = false) => {
+    if (!silent) {
+      const ok = confirm("Bạn có chắc chắn muốn xóa ảnh này không?");
+      if (!ok) return false;
+    }
+
     if (!user || !db) {
       // Chế độ Offline/Local: Gọi API DELETE để xóa ảnh khỏi file data.json cục bộ
       try {
         const apiRes = await fetch(`/api/images/${id}`, { method: 'DELETE' });
         if (apiRes.ok) {
-          const updatedImages = images.filter(img => img.id !== id);
-          setImages(updatedImages);
+          setImages(prev => prev.filter(img => img.id !== id));
           if (fullscreenImage?.id === id) setFullscreenImage(null);
+          return true;
         } else {
           alert('Không thể xóa ảnh khỏi file data.json cục bộ');
+          return false;
         }
       } catch (e) {
         console.error("Lỗi khi xóa ảnh offline:", e);
+        return false;
       }
-      return;
     }
     try {
       await deleteDoc(doc(db, 'artifacts', appId, 'users', user.uid, 'images', id));
       if (fullscreenImage?.id === id) setFullscreenImage(null);
+      return true;
     } catch (error) {
       console.error("Lỗi khi xóa ảnh:", error);
+      return false;
     }
+  };
+
+  const deleteSelectedImages = async () => {
+    if (selectedIds.length === 0) return;
+    const ok = confirm(`Bạn có chắc chắn muốn xóa ${selectedIds.length} ảnh đã chọn không?`);
+    if (!ok) return;
+
+    setIsUploading(true);
+    for (const id of selectedIds) {
+      await deleteImage(id, true);
+    }
+    setIsUploading(false);
+    setSelectedIds([]);
+  };
+
+  const downloadSelectedImages = () => {
+    if (selectedIds.length === 0) return;
+    const selectedImages = images.filter(img => selectedIds.includes(img.id));
+
+    selectedImages.forEach((img, index) => {
+      setTimeout(() => {
+        let downloadUrl = img.url;
+        if (img.publicId && img.cloudName) {
+          downloadUrl = img.url.replace('/upload/', '/upload/fl_attachment/');
+        }
+        const a = document.createElement('a');
+        a.href = downloadUrl;
+        a.download = img.name || `image_${index}`;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+      }, index * 250); // Giãn cách 250ms để trình duyệt tải tuần tự
+    });
   };
 
   // Nhóm ảnh theo ngày cho Timeline
@@ -520,7 +575,14 @@ export default function App() {
                     </h2>
                     <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4 md:gap-6">
                       {groupedByDate[dateStr].map(img => (
-                        <ImageCard key={img.id} image={img} onDelete={deleteImage} onView={() => setFullscreenImage(img)} />
+                        <ImageCard
+                          key={img.id}
+                          image={img}
+                          isSelected={selectedIds.includes(img.id)}
+                          onToggleSelect={toggleSelectImage}
+                          isSelectMode={selectedIds.length > 0}
+                          onView={() => setFullscreenImage(img)}
+                        />
                       ))}
                     </div>
                   </div>
@@ -565,7 +627,14 @@ export default function App() {
                     <h2 className="text-2xl font-bold text-gray-800 mb-6">{selectedAlbum}</h2>
                     <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4 md:gap-6">
                       {groupedByAlbum[selectedAlbum].map(img => (
-                        <ImageCard key={img.id} image={img} onDelete={deleteImage} onView={() => setFullscreenImage(img)} />
+                        <ImageCard
+                          key={img.id}
+                          image={img}
+                          isSelected={selectedIds.includes(img.id)}
+                          onToggleSelect={toggleSelectImage}
+                          isSelectMode={selectedIds.length > 0}
+                          onView={() => setFullscreenImage(img)}
+                        />
                       ))}
                     </div>
                   </div>
@@ -580,6 +649,18 @@ export default function App() {
       {fullscreenImage && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/90 backdrop-blur-sm p-4" onClick={() => setFullscreenImage(null)}>
           <div className="absolute top-4 right-4 flex items-center gap-4 z-50">
+            <button onClick={async (e) => {
+              e.stopPropagation();
+              const deleted = await deleteImage(fullscreenImage.id, false);
+              if (deleted) {
+                setFullscreenImage(null);
+              }
+            }}
+              className="p-3 bg-red-500/80 hover:bg-red-600 text-white rounded-full transition-colors backdrop-blur-md"
+              title="Xóa ảnh này"
+            >
+              <Trash2 className="w-5 h-5" />
+            </button>
             <button onClick={(e) => {
               e.stopPropagation();
               let downloadUrl = fullscreenImage.url;
@@ -612,6 +693,43 @@ export default function App() {
             className="max-w-full max-h-[90vh] object-contain select-none cursor-default"
             onClick={(e) => e.stopPropagation()}
           />
+        </div>
+      )}
+
+      {/* Thanh công cụ thao tác hàng loạt (Bulk Action Bar) */}
+      {selectedIds.length > 0 && (
+        <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-40 bg-white/90 backdrop-blur-md border border-gray-200/80 px-6 py-4 rounded-2xl shadow-xl flex items-center justify-between gap-6 max-w-lg w-[90%] animate-in slide-in-from-bottom-5 duration-300">
+          <div className="flex items-center gap-2">
+            <div className="bg-blue-100 text-blue-700 w-6 h-6 rounded-full flex items-center justify-center font-bold text-xs">
+              {selectedIds.length}
+            </div>
+            <span className="text-sm font-semibold text-gray-700">đang chọn</span>
+          </div>
+
+          <div className="flex items-center gap-2">
+            <button
+              onClick={downloadSelectedImages}
+              className="flex items-center gap-1.5 px-3 py-2 bg-blue-50 text-blue-600 hover:bg-blue-100 rounded-lg text-xs font-semibold transition-colors animate-pulse"
+              style={{ animationDuration: '3s' }}
+              title="Tải về các ảnh đã chọn"
+            >
+              <Download className="w-4 h-4" /> Tải về
+            </button>
+            <button
+              onClick={deleteSelectedImages}
+              className="flex items-center gap-1.5 px-3 py-2 bg-red-50 text-red-600 hover:bg-red-100 rounded-lg text-xs font-semibold transition-colors"
+              title="Xóa các ảnh đã chọn"
+            >
+              <Trash2 className="w-4 h-4" /> Xóa
+            </button>
+            <button
+              onClick={clearSelection}
+              className="p-2 text-gray-400 hover:text-gray-600 hover:bg-gray-100 rounded-lg transition-colors"
+              title="Hủy chọn"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          </div>
         </div>
       )}
 
@@ -732,7 +850,7 @@ export default function App() {
 }
 
 // Component Thẻ Ảnh
-function ImageCard({ image, onDelete, onView }) {
+function ImageCard({ image, isSelected, onToggleSelect, isSelectMode, onView }) {
   const isCloudinary = !!(image.publicId && image.cloudName);
 
   let renderImage;
@@ -759,17 +877,38 @@ function ImageCard({ image, onDelete, onView }) {
   }
 
   return (
-    <div className="group relative aspect-square bg-gray-200 rounded-xl overflow-hidden shadow-sm hover:shadow-lg transition-all duration-300 cursor-pointer"
-      onClick={onView}>
+    <div
+      className={`group relative aspect-square bg-gray-200 rounded-xl overflow-hidden shadow-sm hover:shadow-lg transition-all duration-300 cursor-pointer border-2 ${isSelected
+        ? 'border-blue-600 shadow-blue-500/20 scale-[0.98]'
+        : 'border-transparent'
+        }`}
+      onClick={() => {
+        if (isSelectMode) {
+          onToggleSelect(image.id);
+        } else {
+          onView();
+        }
+      }}
+    >
       {renderImage}
       <div
         className="absolute inset-0 bg-gradient-to-t from-black/60 via-transparent to-transparent opacity-0 group-hover:opacity-100 transition-opacity duration-300" />
-      <button onClick={(e) => { e.stopPropagation(); onDelete(image.id); }}
-        className="absolute top-2 right-2 p-2 bg-red-500/80 hover:bg-red-600 text-white rounded-full opacity-0 group-hover:opacity-100 transition-all duration-300 backdrop-blur-sm"
-        title="Xóa ảnh này"
+
+      {/* Nút tròn chọn ảnh (ở góc trên bên trái) */}
+      <button
+        onClick={(e) => {
+          e.stopPropagation();
+          onToggleSelect(image.id);
+        }}
+        className={`absolute top-3 left-3 z-10 w-6 h-6 rounded-full flex items-center justify-center border transition-all duration-300 ${isSelected
+          ? 'bg-blue-600 border-blue-600 text-white scale-110 shadow-md'
+          : 'bg-black/20 border-white/50 text-transparent hover:bg-black/40 group-hover:opacity-100 opacity-0'
+          }`}
+        title={isSelected ? "Bỏ chọn" : "Chọn ảnh này"}
       >
-        <Trash2 className="w-4 h-4" />
+        <Check className="w-3.5 h-3.5 stroke-[3]" />
       </button>
+
       <div
         className="absolute bottom-0 left-0 right-0 p-3 opacity-0 group-hover:opacity-100 transition-opacity duration-300">
         <p className="text-white text-sm font-medium truncate drop-shadow-md">
